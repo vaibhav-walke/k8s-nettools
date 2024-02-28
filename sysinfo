@@ -1,0 +1,1089 @@
+
+#!/usr/bin/env bash
+#
+#  sysinfo - Display a summary of system hardware, operating system, and networking
+#
+#  Author:   Vaibhav Walke <vaibhav.walke181@gmail.com>
+#
+#  Copyright (C) 2023 Vaibhav Walke
+#
+
+#  This program is free software; you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation; Version 2 (GPLv2)
+
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+
+#  You should have received a copy of the GNU General Public License along
+#  with this program; if not, write to the Free Software Foundation, Inc.,
+#  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+# Full license text at: https://gnu.org/licenses/gpl-2.0.txt
+
+# TODO: Substitute sed for complex gawk statements (ie: match, gsub)
+# TODO: Produce alternative output for commands some systems may not support
+#            eg: ip, ss, dmidecode, lscpu, xargs, free
+
+NAME="Sysinfo"
+PURPOSE="Display a summary of system hardware, operating system, and networking"
+VERSION="1.0.3"
+UPDATED="22 October 2023"
+AUTHOR="Vaibhav Walke"
+EMAIL="vaibhav.walke181@gmail.com"
+
+USAGE="Usage: sysinfo [OPTIONS]
+
+Option          Meaning
+ -a             Show detailed system information
+ -d             Show disk usage
+ -h, --help     Show usage and options
+ -l             Print a longer list of info than default
+ --license      Print full program license to the screen
+ -p             Show active services listening on TCP + UDP ports
+ -s             Show a short summary
+ -v, --version  Print version info
+ -w             List configured web directories"
+
+#
+# Global Variables
+#
+OSNAME=""
+OSRELEASE=""
+OSCODENAME=""
+OSKERNEL=""
+
+#--------------------------------------
+#             Main
+#--------------------------------------
+main()
+{
+  while getopts ":-:adhlpr:svw" opt; do
+    case "$opt" in
+        -) check_long_opts "${OPTARG}"; shift ;;
+        a) opt_all=true ;;
+        d) opt_disk=true ;;
+        h) show_help ;;
+        l) opt_long=true ;;
+        p) opt_ports=true ;;
+        r) RHOST="${OPTARG}"; exec_remote ;;
+        s) opt_short=true ;;
+        v) show_version ;;
+        w) opt_web=true ;;
+       \?) show_error "\"-${OPTARG}\" is an invalid option" ;;
+        :) show_error "The option \"-${OPTARG}\" requires an argumemt." ;;
+    esac
+  done
+  if [ $? -ne 0 ];then opt_none=true; fi
+  shift $((OPTIND -1))
+
+  begin
+  os_check
+  if [ "$opt_short" = true ];then
+    system
+    show_os
+    cpu
+    mem
+    exit 0;
+  fi
+  header
+  name
+  # ipaddr
+  ethip4
+  if [ "$opt_ports" = true ];then
+    # iface
+    tsvc
+    usvc
+    exit 0
+  fi
+  system
+  show_os
+  cpuinfo
+  if [ "$opt_web" = true ];then web; exit 0; fi
+  if [ "$opt_disk" = true ];then
+    space
+    dirs
+    exit 0
+  fi
+  gpu
+  mem
+  # iface
+  if [ "$opt_all" = true ] || [ "$opt_long" = true ];then
+    tsvc
+    usvc
+  else
+    tsvc
+  fi
+  # Stop here with no args (default)
+  if [ "$opt_none" ];then
+    exit 0
+  fi
+  if [ "$opt_long" = true ];then
+    #dirs
+    #askweb
+    log
+  elif [ "$opt_all" = true ];then
+    space
+    dirs
+    web
+    log
+  fi
+  exit 0 #-------- End --------
+}
+
+#--------------------------------------
+#           Functions
+#--------------------------------------
+begin(){
+  # If run from a terminal use colors
+  if [[ -t 1 && $(command -v tput) ]];then
+    bold_text=$(tput bold)
+    red_text=$(tput setaf 1)
+    green_text=$(tput setaf 2)
+    yellow_text=$(tput setaf 3)
+    cyan_text=$(tput setaf 6)
+    normal_text=$(tput sgr0)
+  else
+    bold_text=
+    red_text=
+    green_text=
+    yellow_text=
+    cyan_text=
+    normal_text=
+  fi
+}
+check_long_opts(){
+  local long_option="$1"
+  case ${long_option} in
+    about) show_about ;;
+    license) show_license ;;
+    version) show_version ;;
+    help) show_help ;;
+    *) show_error "\"--${long_option}\" is an invalid option" ;;
+  esac
+}
+show_about(){
+	echo "${NAME} version ${VERSION} (updated ${UPDATED})"
+	echo "${PURPOSE}"
+	echo "${USAGE}"
+  echo
+	echo "${COPYRIGHT}"
+  echo
+	echo "Contact: ${AUTHOR} <${EMAIL}>"
+  echo "Website: ${WEB}"
+	exit 0
+}
+show_version(){
+	echo "${NAME} version ${VERSION} (updated ${UPDATED})"
+	echo "${COPYRIGHT}"
+  echo
+	echo "Contact: ${AUTHOR} <${EMAIL}>"
+  echo "Website: ${WEB}"
+	exit 0
+}
+show_help(){
+	echo "${NAME} version ${VERSION} (updated ${UPDATED})"
+	echo "${USAGE}"
+  exit 0
+}
+show_error(){
+  echo "$1" 1>&2
+	echo "${NAME} version ${VERSION} (updated ${UPDATED})"
+	echo "${USAGE}"
+  exit 1
+}
+show_license(){
+	echo "${NAME} version ${VERSION} (updated ${UPDATED})"
+	echo "${COPYRIGHT}"
+  echo
+  echo "${LICENSE}"
+  echo
+	echo "Contact: ${AUTHOR} <${EMAIL}>"
+  echo "Website: ${WEB}"
+	exit 0
+}
+exec_remote(){
+  local sysinfo="$(cd "$(dirname "$0")" ; pwd -P )/$(basename "$0")"
+  ssh "${RHOST}" "bash -s" < ${sysinfo}
+  exit $?
+}
+header(){
+  echo "-----------------------------------------------------"
+}
+name(){
+  printf "Hostname: ${bold_text}%s${normal_text}\n" $(hostname)
+}
+ipaddr(){
+  # TODO: Look in /proc/net/fib_trie for ip addresses when no ip on system
+  local ips=""
+  if command -v ip >/dev/null 2>&1; then
+    for ipa in $(ip a|awk '/global/ {print $2}'|sed 's/\/.*//');do
+      ips="${ipa}, ${ips}"
+    done
+  elif command -v ifconfig >/dev/null 2>&1; then
+    for ipa in $(ifconfig | grep "inet " | grep -Fv 127.0.0.1 | awk '{print $2}');do
+      ips="${ipa}, ${ips}"
+    done
+  else
+    for ipa in $(hostname --all-ip-addresses 2>/dev/null);do
+      ips="${ipa}, ${ips}"
+    done
+  fi
+  printf "IP addresses: ${ips%,*}\n"
+}
+ethip4(){
+  # TODO: Look in /proc/net/dev for interfaces when no ip on system
+  if command -v ip >/dev/null 2>&1; then
+    local eips=""
+    local interfaces=""
+    if command -v gawk > /dev/null 2>&1; then
+      interfaces="$(ip -4 -o a show scope global up | awk 'match($4,/([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})/,ip) {print $2":"ip[1]}')"
+    else
+      interfaces="$(ip -4 -o a show scope global up | awk '{print $2":"$4}'|sed "s/\/.*//")"
+    fi
+    local i=0
+    for eip in ${interfaces};do
+      if [[ $i -eq 0 ]]; then
+        eips="${eip}"
+        i=1
+      else
+        eips="${eips}, ${eip}"
+      fi
+    done
+    printf "IP4 addresses: ${eips}\n"
+  else
+    ipaddr
+  fi
+}
+system(){
+  if [[ $EUID -eq 0 ]] && command -v dmidecode > /dev/null 2>&1;then
+    mfg="$(dmidecode -s system-manufacturer)"
+    prod="$(dmidecode -s system-product-name)"
+  elif [[ -f /sys/devices/virtual/dmi/id/sys_vendor ]]; then
+    mfg="$(cat /sys/devices/virtual/dmi/id/sys_vendor)"
+    prod="$(cat /sys/devices/virtual/dmi/id/product_name)"
+  elif grep -qi apple /sys/devices/platform/hypervisor/modalias 2>/dev/null; then
+    mfg="Apple"
+    prod="Mac"
+  elif [[ $OSNAME == "Darwin" ]]; then
+    mfg="Apple"
+    prod="$(system_profiler SPHardwareDataType | awk '/Model Name:/ {$1=$2=""; print $0}')"
+  fi
+  arch="$(arch)"
+  # Sometimes we see newlines in dmi output, supress with printf
+  printf "System: "
+  if [[ -f /.dockerenv ]] || egrep -q '/docker/|/lxc/|/containerd/' /proc/self/mounts >/dev/null 2>&1; then
+      printf "Docker container on "
+  fi
+  printf "${mfg} ${prod#  } (${arch})\n"
+}
+os_check(){
+  if [[ -f /etc/lsb-release ]];then
+    source /etc/lsb-release
+    OSNAME="$DISTRIB_ID"
+    OSRELEASE="$DISTRIB_RELEASE"
+    OSCODENAME="$DISTRIB_CODENAME"
+  elif [[ -f /etc/os-release ]];then
+    source /etc/os-release
+    OSNAME="$NAME"
+    OSRELEASE="$VERSION_ID"
+    OSCODENAME="$VERSION_CODENAME"
+  else
+    OSNAME="$(uname)"
+  fi
+  OSKERNEL="$(uname -r)"
+}
+show_os(){
+  echo "OS: ${red_text}${OSNAME}${normal_text} $OSRELEASE $OSCODENAME Kernel: $OSKERNEL"
+}
+cpu(){
+  if command -v lscpu >/dev/null 2>&1; then
+    if command -v gawk > /dev/null 2>&1; then
+      cpucount="$(lscpu|awk -F: '/^CPU\(s\):/ {match($2,/([0-9]+)/,n);print n[1]}')"
+      cpumodel="$(lscpu|awk -F: '/^Model name:/ {match($2,/\s+(\w.*)/,n);print n[1]}')"
+    else
+      cpucount="$(lscpu|awk -F: '/^CPU\(s\):/ {print $2}'|xargs)"
+      cpumodel="$(lscpu|awk -F: '/^Model name:/ {print $2}'|xargs)"
+    fi
+  else
+    coresper="$(sysctl -a | awk '/machdep.cpu.cores_per_package:/ {$1=""; print $0}')"
+    cores="$(sysctl -a | awk '/machdep.cpu.core_count:/ {$1=""; print $0}')"
+    cpucount=$((cores/coresper))
+    cpumodel="$(sysctl -a | awk '/machdep.cpu.brand_string:/ {$1=""; print $0}')"
+  fi
+  printf "CPU Info: ${bold_text}%s${normal_text} x %s\n" "$cpucount" "$cpumodel"
+}
+cpuinfo(){
+  cpu
+  if command -v lscpu >/dev/null 2>&1; then
+    local skts=""
+    local cps=""
+    local tpc=""
+    local cpucache=""
+    if command -v gawk > /dev/null 2>&1;then
+      skts="$(lscpu|awk -F: '/^Socket\(s\):/ {match($2,/([0-9]+)/,n);print n[1]}')"
+      cps="$(lscpu|awk -F: '/^Core\(s\) per / {match($2,/([0-9]+)/,n);print n[1]}')"
+      tpc="$(lscpu|awk -F: '/^Thread\(s\) per / {match($2,/([0-9]+)/,n);print n[1]}')"
+    else
+      skts="$(lscpu|awk -F: '/^Socket\(s\):/ {print $2}'|sed "s/ //g")"
+      cps="$(lscpu|awk -F: '/^Core\(s\) per / {print $2}'|sed "s/ //g")"
+      tpc="$(lscpu|awk -F: '/^Thread\(s\) per / {print $2}'|sed "s/ //g")"
+    fi
+    printf "%s sockets | %s cores per socket | %s threads per core | " \
+      "${skts}" "${cps}" "${tpc}"
+    if command -v numfmt > /dev/null 2>&1;then
+      # If numfmt > 8.22
+      #cpucache="$(cat /proc/cpuinfo|awk -F": " '/^cache size/ {print $2}'|numfmt -d _ --from=iec --to=iec --suffix=B --format="%.1f")"
+      cpucache="$(cat /proc/cpuinfo|awk -F": " '/^cache size/ {print $2;exit;}'|numfmt -d _ --from=iec --to=iec --suffix=B)"
+    else
+      cpucache="$(cat /proc/cpuinfo|awk -F": " '/^cache size/ {print $2;exit;}')"
+    fi
+    echo "${cpucache} cache"
+  fi
+}
+gpu(){
+  if command -v nvidia-smi > /dev/null 2>&1;then
+    #gpus="$(nvidia-smi --query-gpu=gpu_name 2> /dev/null)"
+    #echo "GPU Info: ${bold_text}%s${normal_text}\n" "$gpus"
+    echo "GPU(s):"
+    nvidia-smi --query-gpu=gpu_name --format=csv,noheader 2> /dev/null
+  fi
+}
+mem(){
+  if command -v free >/dev/null 2>&1; then
+    avail="$(free -h | awk '/Mem:/{print $2}')"
+    freem="$(free -h | awk '/Mem:/{print $4}')"
+    if [[ "$freem" =~ "M" ]];then
+      freem="${red_text}$freem${normal_text}"
+    fi
+    printf "Total memory: %s Free memory: %s\n" "$avail" "$freem"
+  fi
+}
+iface(){
+  if command -v ip >/dev/null 2>&1; then
+    printf "Network interfaces: "
+    for foo in $(ip link show up|grep -i "state up"|awk -F": " '{print $2}'); do
+      printf "$foo "
+    done
+    echo
+  fi
+}
+tsvc(){
+  # TODO: Find ports in /proc/net/tcp if no ss on system
+  local ports=""
+  printf "TCP ports listening: "
+  if [[ $EUID -ne 0 ]] && command -v ss >/dev/null 2>&1; then
+    if command -v gawk > /dev/null 2>&1;then
+      ports="$(ss -ltn | awk 'NR>1 match($4,/.*:([0-9]+)$/,m){print m[1]}'|sort -u)"
+    else
+      ports="$(ss -ltn | awk 'NR>1 {print $4}'|sed -E "s/.*:([0-9]+)$/\\1/"|sort -u)"
+    fi
+    for tsrv in ${ports};do
+      local tn="$(grep "\s${tsrv}/tcp" /etc/services|awk '{print $1}')"
+      if [[ -z "${tn}" ]];then
+        printf "%s " "${tsrv}"
+      else
+        printf "%s(%s) " "${tsrv}" "${tn}"
+      fi
+      done
+  elif command -v ss >/dev/null 2>&1; then
+    if command -v gawk > /dev/null 2>&1; then
+      ports="$(ss -pltn | awk 'NR>1 {{match($4,/.*:([0-9]+)$/,port) match($6,/users:\(\(\"([a-z][-a-z0-9_.]+)\"/,name)} {print name[1]"("port[1]")"}};' | sort -u)"
+    else
+      ports="$(ss -pltn | awk 'NR>1 {print $4,$6}' |sed -E "s/.*:([0-9]+) users:\(\(\"([^\"]+).*/\\1(\\2)/"|sort -u)"
+    fi
+    for tsrv in ${ports};do
+      printf "$tsrv "
+    done
+  elif [[ -f /proc/net/tcp ]]; then
+    for port in $(cat /proc/net/tcp | awk -F"[ :]" '/ 0A / {print "0x"$7}'); do
+      printf "%d(%s) " $((port)) "${svc_tcp["$((port))"]}"
+    done
+  fi
+  echo
+}
+usvc(){
+  local ports=""
+  printf "UDP ports listening: "
+  if [[ $EUID -ne 0 ]] && command -v ss >/dev/null 2>&1; then
+    if command -v gawk > /dev/null 2>&1;then
+      ports="$(ss -lun | awk 'NR>1 match($4,/.*:([0-9]+)/,m){print m[1]}'|sort -u)"
+    else
+      ports="$(ss -lun | awk 'NR>1 {print $4}'|sed -E "s/.*:([0-9]+)$/\\1/"|sort -u)"
+    fi
+    for usrv in ${ports};do
+      local un="$(grep "\s${usrv}/udp" /etc/services|awk '{print $1}')"
+      if [[ -z "${un}" ]];then
+        printf "%s " "${usrv}"
+      else
+        printf "%s(%s) " "${usrv}" "${un}"
+      fi
+    done
+  elif command -v ss >/dev/null 2>&1; then
+    if command -v gawk > /dev/null 2>&1;then
+      ports="$(ss -plun | awk 'NR>1 {{match($4,/.*:([0-9]+)$/,port) match($6,/users:\(\(\"([a-z][-a-z0-9_.]+)\"/,name)} {print name[1]"("port[1]")"}};' | sort -u)"
+    else
+      ports="$(ss -plun | awk 'NR>1 {print $4,$6}' |sed -E "s/.*:([0-9]+) users:\(\(\"([^\"]+).*/\\1(\\2)/"|sort -u)"
+    fi
+    for usrv in ${ports};do
+      printf "$usrv "
+    done
+  elif [[ -f /proc/net/udp ]]; then
+    for port in $(cat /proc/net/udp | awk -F"[ :]" '/ 0A / {print "0x"$7}'); do
+      printf "%d(%s) " $((port)) "${svc_udp["$((port))"]}"
+    done
+  fi
+  echo
+}
+filterbody() {
+    IFS= read -r header
+    printf '%s\n' "$header"
+    "$@"
+}
+space(){
+  # TODO: Use systemprofiler for info gathering on Apple computers
+  # Eg: system_profiler SPSoftwareDataType SPHardwareDataType SPMemoryDataType SPPowerDataType SPStorageDataType
+  echo "Disk space: "
+  #df -h --output=target,size,avail,pcent -t xfs -t ext3 -t ext4
+  if [[ $OSNAME == "Darwin" ]]; then
+    df -h \
+      | filterbody sort -rhk 5 \
+      | grep -v 'map auto_home'
+  else
+    df -h --output=target,fstype,size,avail,pcent \
+      | filterbody sort -rhk 5 \
+      | grep -v 'tmpfs'
+  fi
+}
+dirs(){
+  echo
+  printf "Gathering filesystem info, this may take a minute..."
+  local homes="$(du -sh /home/* 2>/dev/null | sort -rh | head -5)"
+  local vars="$(du -sh /var/* 2>/dev/null | sort -rh | egrep '^[0-9][0-9][0-9]+M|^[0-9.]+G' | head -5)"
+  if command -v tput > /dev/null 2>&1; then
+    # Clear to beginning of line
+    printf $(tput el1)
+    # Move cursor left 52 spaces (Back to beginning of line)
+    printf $(tput cub 52)
+    # Move cursor up 1 line
+    printf $(tput cuu1)
+  else
+    # Mover cusor back 52 spaces (to beginning of line)
+    printf "\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b"
+    # Overight previous text
+    printf "                                                    "
+    # Move cursor back to beginning of line
+    printf "\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b"
+  fi
+  if [[ ! -z ${homes+x} ]]; then
+    echo "Top home directories by size: "
+    echo "${homes}"
+  fi
+  if [[ ! -z ${vars+x} ]]; then
+    echo "Large var directories: "
+    echo "${vars}"
+  fi
+}
+web(){
+  find /etc/apache2 -name "*.conf" 2>/dev/null \
+    | xargs egrep -i '^ServerName\s+\w|^ServerRoot\s+\w|^<Directory ' \
+    | awk -F ":" 'gsub(/\s+/," ",$2){print "apache2:"$2}' \
+    | sed "s/apache2: /apache2:/" \
+    | sed -r "s/<Directory \"?([^>\"]+).*/Dir:\1/" \
+    | sort -r -u
+  find /etc/httpd -name "*.conf" 2>/dev/null \
+    | xargs egrep -i '^ServerName\s+\w|^DocumentRoot\s+\w|^<Directory ' \
+    | awk -F ":" 'gsub(/\s+/," ",$2){print "httpd:"$2}' \
+    | sed "s/httpd: /httpd:/" \
+    | sed -r "s/<Directory \"?([^>\"]+).*/Dir:\1/" \
+    | sort -r -u
+  find /etc/nginx /etc/nginx -name "*.conf" 2>/dev/null \
+    | xargs egrep -i "server_name\s+\w|location\s+\w|root\s+\w|alias\s+\w|mirror\s+\w" \
+    | awk -F ":" 'gsub(/\s+/," ",$2) {print "nginx:"$2}' \
+    | sed "s/nginx: /nginx:/" \
+    | sed -r "/[^ ]+ [^a-zA-Z]+$/d" \
+    | sed "/^nginx:#/d" \
+    | sort -r -u
+}
+askweb(){
+  if command -v gawk > /dev/null 2>&1;then
+    echo "Web shares: "
+    webcount=$(web | wc -l)
+    web | head -10
+    if [ "$webcount" -gt 10 ]; then
+      echo "Press q to quit or any other key to view the more than 10 web directories"
+      if read -r -n1 -t 5 -s key_in && [ "$key_in" != "q" ];then
+        web | awk 'NR>10 {print}'
+      fi
+    fi
+  elif [ "$opt_web" = true ];then
+    echo "Skipping web directories (requires gawk)"
+  fi
+}
+# Not sure how usefull this is, but I think it gives an idea of server health
+# TODO: Smart checking of which log to check based on system
+log(){
+  local logfile="/var/log/messages"
+  if [[ $EUID -eq 0 ]]; then
+    if [[ -f "$logfile" ]]; then
+      local logsize="$(wc -l "$logfile" | awk '{print $1}')"
+      if [[ "${logsize}" -gt 0 ]];then
+        local warnings="$(egrep -i "fail|error" "$logfile" | wc -l)"
+        local warnpct="$(awk -v W="${warnings}" -v L="${logsize}" 'BEGIN {print ((W * 100) / L)}')"
+        printf '%s warnings in %s log entries: %.1f%% log error rate\n' "${warnings}" "${logsize}" "${warnpct}"
+      fi
+    else
+      printf "No logfile at %s\n" "$logfile"
+    fi
+  fi
+}
+read -r -d '' LICENSE <<'EOF'
+.                   GNU GENERAL PUBLIC LICENSE
+   TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
+
+  0. This License applies to any program or other work which contains
+a notice placed by the copyright holder saying it may be distributed
+under the terms of this General Public License.  The "Program", below,
+refers to any such program or work, and a "work based on the Program"
+means either the Program or any derivative work under copyright law:
+that is to say, a work containing the Program or a portion of it,
+either verbatim or with modifications and/or translated into another
+language.  (Hereinafter, translation is included without limitation in
+the term "modification".)  Each licensee is addressed as "you".
+
+Activities other than copying, distribution and modification are not
+covered by this License; they are outside its scope.  The act of
+running the Program is not restricted, and the output from the Program
+is covered only if its contents constitute a work based on the
+Program (independent of having been made by running the Program).
+Whether that is true depends on what the Program does.
+
+  1. You may copy and distribute verbatim copies of the Program's
+source code as you receive it, in any medium, provided that you
+conspicuously and appropriately publish on each copy an appropriate
+copyright notice and disclaimer of warranty; keep intact all the
+notices that refer to this License and to the absence of any warranty;
+and give any other recipients of the Program a copy of this License
+along with the Program.
+
+You may charge a fee for the physical act of transferring a copy, and
+you may at your option offer warranty protection in exchange for a fee.
+
+  2. You may modify your copy or copies of the Program or any portion
+of it, thus forming a work based on the Program, and copy and
+distribute such modifications or work under the terms of Section 1
+above, provided that you also meet all of these conditions:
+
+    a) You must cause the modified files to carry prominent notices
+    stating that you changed the files and the date of any change.
+
+    b) You must cause any work that you distribute or publish, that in
+    whole or in part contains or is derived from the Program or any
+    part thereof, to be licensed as a whole at no charge to all third
+    parties under the terms of this License.
+
+    c) If the modified program normally reads commands interactively
+    when run, you must cause it, when started running for such
+    interactive use in the most ordinary way, to print or display an
+    announcement including an appropriate copyright notice and a
+    notice that there is no warranty (or else, saying that you provide
+    a warranty) and that users may redistribute the program under
+    these conditions, and telling the user how to view a copy of this
+    License.  (Exception: if the Program itself is interactive but
+    does not normally print such an announcement, your work based on
+    the Program is not required to print an announcement.)
+
+These requirements apply to the modified work as a whole.  If
+identifiable sections of that work are not derived from the Program,
+and can be reasonably considered independent and separate works in
+themselves, then this License, and its terms, do not apply to those
+sections when you distribute them as separate works.  But when you
+distribute the same sections as part of a whole which is a work based
+on the Program, the distribution of the whole must be on the terms of
+this License, whose permissions for other licensees extend to the
+entire whole, and thus to each and every part regardless of who wrote it.
+
+Thus, it is not the intent of this section to claim rights or contest
+your rights to work written entirely by you; rather, the intent is to
+exercise the right to control the distribution of derivative or
+collective works based on the Program.
+
+In addition, mere aggregation of another work not based on the Program
+with the Program (or with a work based on the Program) on a volume of
+a storage or distribution medium does not bring the other work under
+the scope of this License.
+
+  3. You may copy and distribute the Program (or a work based on it,
+under Section 2) in object code or executable form under the terms of
+Sections 1 and 2 above provided that you also do one of the following:
+
+    a) Accompany it with the complete corresponding machine-readable
+    source code, which must be distributed under the terms of Sections
+    1 and 2 above on a medium customarily used for software interchange; or,
+
+    b) Accompany it with a written offer, valid for at least three
+    years, to give any third party, for a charge no more than your
+    cost of physically performing source distribution, a complete
+    machine-readable copy of the corresponding source code, to be
+    distributed under the terms of Sections 1 and 2 above on a medium
+    customarily used for software interchange; or,
+
+    c) Accompany it with the information you received as to the offer
+    to distribute corresponding source code.  (This alternative is
+    allowed only for noncommercial distribution and only if you
+    received the program in object code or executable form with such
+    an offer, in accord with Subsection b above.)
+
+The source code for a work means the preferred form of the work for
+making modifications to it.  For an executable work, complete source
+code means all the source code for all modules it contains, plus any
+associated interface definition files, plus the scripts used to
+control compilation and installation of the executable.  However, as a
+special exception, the source code distributed need not include
+anything that is normally distributed (in either source or binary
+form) with the major components (compiler, kernel, and so on) of the
+operating system on which the executable runs, unless that component
+itself accompanies the executable.
+
+If distribution of executable or object code is made by offering
+access to copy from a designated place, then offering equivalent
+access to copy the source code from the same place counts as
+distribution of the source code, even though third parties are not
+compelled to copy the source along with the object code.
+
+  4. You may not copy, modify, sublicense, or distribute the Program
+except as expressly provided under this License.  Any attempt
+otherwise to copy, modify, sublicense or distribute the Program is
+void, and will automatically terminate your rights under this License.
+However, parties who have received copies, or rights, from you under
+this License will not have their licenses terminated so long as such
+parties remain in full compliance.
+
+  5. You are not required to accept this License, since you have not
+signed it.  However, nothing else grants you permission to modify or
+distribute the Program or its derivative works.  These actions are
+prohibited by law if you do not accept this License.  Therefore, by
+modifying or distributing the Program (or any work based on the
+Program), you indicate your acceptance of this License to do so, and
+all its terms and conditions for copying, distributing or modifying
+the Program or works based on it.
+
+  6. Each time you redistribute the Program (or any work based on the
+Program), the recipient automatically receives a license from the
+original licensor to copy, distribute or modify the Program subject to
+these terms and conditions.  You may not impose any further
+restrictions on the recipients' exercise of the rights granted herein.
+You are not responsible for enforcing compliance by third parties to
+this License.
+
+  7. If, as a consequence of a court judgment or allegation of patent
+infringement or for any other reason (not limited to patent issues),
+conditions are imposed on you (whether by court order, agreement or
+otherwise) that contradict the conditions of this License, they do not
+excuse you from the conditions of this License.  If you cannot
+distribute so as to satisfy simultaneously your obligations under this
+License and any other pertinent obligations, then as a consequence you
+may not distribute the Program at all.  For example, if a patent
+license would not permit royalty-free redistribution of the Program by
+all those who receive copies directly or indirectly through you, then
+the only way you could satisfy both it and this License would be to
+refrain entirely from distribution of the Program.
+
+If any portion of this section is held invalid or unenforceable under
+any particular circumstance, the balance of the section is intended to
+apply and the section as a whole is intended to apply in other
+circumstances.
+
+It is not the purpose of this section to induce you to infringe any
+patents or other property right claims or to contest validity of any
+such claims; this section has the sole purpose of protecting the
+integrity of the free software distribution system, which is
+implemented by public license practices.  Many people have made
+generous contributions to the wide range of software distributed
+through that system in reliance on consistent application of that
+system; it is up to the author/donor to decide if he or she is willing
+to distribute software through any other system and a licensee cannot
+impose that choice.
+
+This section is intended to make thoroughly clear what is believed to
+be a consequence of the rest of this License.
+
+  8. If the distribution and/or use of the Program is restricted in
+certain countries either by patents or by copyrighted interfaces, the
+original copyright holder who places the Program under this License
+may add an explicit geographical distribution limitation excluding
+those countries, so that distribution is permitted only in or among
+countries not thus excluded.  In such case, this License incorporates
+the limitation as if written in the body of this License.
+
+  9. The Free Software Foundation may publish revised and/or new versions
+of the General Public License from time to time.  Such new versions will
+be similar in spirit to the present version, but may differ in detail to
+address new problems or concerns.
+
+Each version is given a distinguishing version number.  If the Program
+specifies a version number of this License which applies to it and "any
+later version", you have the option of following the terms and conditions
+either of that version or of any later version published by the Free
+Software Foundation.  If the Program does not specify a version number of
+this License, you may choose any version ever published by the Free Software
+Foundation.
+
+  10. If you wish to incorporate parts of the Program into other free
+programs whose distribution conditions are different, write to the author
+to ask for permission.  For software which is copyrighted by the Free
+Software Foundation, write to the Free Software Foundation; we sometimes
+make exceptions for this.  Our decision will be guided by the two goals
+of preserving the free status of all derivatives of our free software and
+of promoting the sharing and reuse of software generally.
+
+                            NO WARRANTY
+
+  11. BECAUSE THE PROGRAM IS LICENSED FREE OF CHARGE, THERE IS NO WARRANTY
+FOR THE PROGRAM, TO THE EXTENT PERMITTED BY APPLICABLE LAW.  EXCEPT WHEN
+OTHERWISE STATED IN WRITING THE COPYRIGHT HOLDERS AND/OR OTHER PARTIES
+PROVIDE THE PROGRAM "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED
+OR IMPLIED, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.  THE ENTIRE RISK AS
+TO THE QUALITY AND PERFORMANCE OF THE PROGRAM IS WITH YOU.  SHOULD THE
+PROGRAM PROVE DEFECTIVE, YOU ASSUME THE COST OF ALL NECESSARY SERVICING,
+REPAIR OR CORRECTION.
+
+  12. IN NO EVENT UNLESS REQUIRED BY APPLICABLE LAW OR AGREED TO IN WRITING
+WILL ANY COPYRIGHT HOLDER, OR ANY OTHER PARTY WHO MAY MODIFY AND/OR
+REDISTRIBUTE THE PROGRAM AS PERMITTED ABOVE, BE LIABLE TO YOU FOR DAMAGES,
+INCLUDING ANY GENERAL, SPECIAL, INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING
+OUT OF THE USE OR INABILITY TO USE THE PROGRAM (INCLUDING BUT NOT LIMITED
+TO LOSS OF DATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY
+YOU OR THIRD PARTIES OR A FAILURE OF THE PROGRAM TO OPERATE WITH ANY OTHER
+PROGRAMS), EVEN IF SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGES.
+
+                     END OF TERMS AND CONDITIONS
+EOF
+#--------------------------------------
+#           end functions
+#--------------------------------------
+
+#
+# Hashtable for service lookups
+#
+svc_tcp=()
+svc_tcp["1"]="tcpmux"
+svc_tcp["7"]="echo"
+svc_tcp["9"]="discard"
+svc_tcp["11"]="systat"
+svc_tcp["13"]="daytime"
+svc_tcp["15"]="netstat"
+svc_tcp["17"]="qotd"
+svc_tcp["19"]="chargen"
+svc_tcp["20"]="ftp-data"
+svc_tcp["21"]="ftp"
+svc_tcp["22"]="ssh"
+svc_tcp["23"]="telnet"
+svc_tcp["25"]="smtp"
+svc_tcp["37"]="time"
+svc_tcp["43"]="whois"
+svc_tcp["49"]="tacacs"
+svc_tcp["53"]="domain"
+svc_tcp["70"]="gopher"
+svc_tcp["79"]="finger"
+svc_tcp["80"]="http"
+svc_tcp["88"]="kerberos"
+svc_tcp["102"]="iso-tsap"
+svc_tcp["104"]="acr-nema"
+svc_tcp["106"]="poppassd"
+svc_tcp["110"]="pop3"
+svc_tcp["111"]="sunrpc"
+svc_tcp["113"]="auth"
+svc_tcp["119"]="nntp"
+svc_tcp["135"]="epmap"
+svc_tcp["139"]="netbios-ssn"
+svc_tcp["143"]="imap2"
+svc_tcp["161"]="snmp"
+svc_tcp["162"]="snmp-trap"
+svc_tcp["163"]="cmip-man"
+svc_tcp["164"]="cmip-agent"
+svc_tcp["174"]="mailq"
+svc_tcp["179"]="bgp"
+svc_tcp["199"]="smux"
+svc_tcp["209"]="qmtp"
+svc_tcp["210"]="z3950"
+svc_tcp["345"]="pawserv"
+svc_tcp["346"]="zserv"
+svc_tcp["369"]="rpc2portmap"
+svc_tcp["370"]="codaauth2"
+svc_tcp["389"]="ldap"
+svc_tcp["427"]="svrloc"
+svc_tcp["443"]="https"
+svc_tcp["444"]="snpp"
+svc_tcp["445"]="microsoft-ds"
+svc_tcp["464"]="kpasswd"
+svc_tcp["465"]="submissions"
+svc_tcp["487"]="saft"
+svc_tcp["512"]="exec"
+svc_tcp["513"]="login"
+svc_tcp["514"]="shell"
+svc_tcp["515"]="printer"
+svc_tcp["538"]="gdomap"
+svc_tcp["540"]="uucp"
+svc_tcp["543"]="klogin"
+svc_tcp["544"]="kshell"
+svc_tcp["548"]="afpovertcp"
+svc_tcp["554"]="rtsp"
+svc_tcp["563"]="nntps"
+svc_tcp["587"]="submission"
+svc_tcp["607"]="nqs"
+svc_tcp["628"]="qmqp"
+svc_tcp["631"]="ipp"
+svc_tcp["636"]="ldaps"
+svc_tcp["646"]="ldp"
+svc_tcp["655"]="tinc"
+svc_tcp["706"]="silc"
+svc_tcp["749"]="kerberos-adm"
+svc_tcp["750"]="kerberos4"
+svc_tcp["751"]="kerberos-master"
+svc_tcp["754"]="krb-prop"
+svc_tcp["775"]="moira-db"
+svc_tcp["777"]="moira-update"
+svc_tcp["783"]="spamd"
+svc_tcp["853"]="domain-s"
+svc_tcp["871"]="supfilesrv"
+svc_tcp["873"]="rsync"
+svc_tcp["989"]="ftps-data"
+svc_tcp["990"]="ftps"
+svc_tcp["992"]="telnets"
+svc_tcp["993"]="imaps"
+svc_tcp["995"]="pop3s"
+svc_tcp["1080"]="socks"
+svc_tcp["1093"]="proofd"
+svc_tcp["1094"]="rootd"
+svc_tcp["1099"]="rmiregistry"
+svc_tcp["1127"]="supfiledbg"
+svc_tcp["1178"]="skkserv"
+svc_tcp["1194"]="openvpn"
+svc_tcp["1236"]="rmtcfg"
+svc_tcp["1313"]="xtel"
+svc_tcp["1314"]="xtelw"
+svc_tcp["1352"]="lotusnote"
+svc_tcp["1433"]="ms-sql-s"
+svc_tcp["1524"]="ingreslock"
+svc_tcp["1645"]="datametrics"
+svc_tcp["1646"]="sa-msg-port"
+svc_tcp["1649"]="kermit"
+svc_tcp["1677"]="groupwise"
+svc_tcp["1812"]="radius"
+svc_tcp["1813"]="radius-acct"
+svc_tcp["2000"]="cisco-sccp"
+svc_tcp["2049"]="nfs"
+svc_tcp["2086"]="gnunet"
+svc_tcp["2101"]="rtcm-sc104"
+svc_tcp["2119"]="gsigatekeeper"
+svc_tcp["2121"]="iprop"
+svc_tcp["2135"]="gris"
+svc_tcp["2401"]="cvspserver"
+svc_tcp["2430"]="venus"
+svc_tcp["2431"]="venus-se"
+svc_tcp["2432"]="codasrv"
+svc_tcp["2433"]="codasrv-se"
+svc_tcp["2583"]="mon"
+svc_tcp["2600"]="zebrasrv"
+svc_tcp["2601"]="zebra"
+svc_tcp["2602"]="ripd"
+svc_tcp["2603"]="ripngd"
+svc_tcp["2604"]="ospfd"
+svc_tcp["2605"]="bgpd"
+svc_tcp["2606"]="ospf6d"
+svc_tcp["2607"]="ospfapi"
+svc_tcp["2608"]="isisd"
+svc_tcp["2628"]="dict"
+svc_tcp["2792"]="f5-globalsite"
+svc_tcp["2811"]="gsiftp"
+svc_tcp["2947"]="gpsd"
+svc_tcp["3050"]="gds-db"
+svc_tcp["3205"]="isns"
+svc_tcp["3260"]="iscsi-target"
+svc_tcp["3306"]="mysql"
+svc_tcp["3389"]="ms-wbt-server"
+svc_tcp["3493"]="nut"
+svc_tcp["3632"]="distcc"
+svc_tcp["3689"]="daap"
+svc_tcp["3690"]="svn"
+svc_tcp["4031"]="suucp"
+svc_tcp["4094"]="sysrqd"
+svc_tcp["4190"]="sieve"
+svc_tcp["4353"]="f5-iquery"
+svc_tcp["4369"]="epmd"
+svc_tcp["4373"]="remctl"
+svc_tcp["4460"]="ntske"
+svc_tcp["4557"]="fax"
+svc_tcp["4559"]="hylafax"
+svc_tcp["4691"]="mtn"
+svc_tcp["4899"]="radmin-port"
+svc_tcp["4949"]="munin"
+svc_tcp["5060"]="sip"
+svc_tcp["5061"]="sip-tls"
+svc_tcp["5222"]="xmpp-client"
+svc_tcp["5269"]="xmpp-server"
+svc_tcp["5308"]="cfengine"
+svc_tcp["5432"]="postgresql"
+svc_tcp["5556"]="freeciv"
+svc_tcp["5666"]="nrpe"
+svc_tcp["5667"]="nsca"
+svc_tcp["5671"]="amqps"
+svc_tcp["5672"]="amqp"
+svc_tcp["5680"]="canna"
+svc_tcp["6000"]="x11"
+svc_tcp["6001"]="x11-1"
+svc_tcp["6002"]="x11-2"
+svc_tcp["6003"]="x11-3"
+svc_tcp["6004"]="x11-4"
+svc_tcp["6005"]="x11-5"
+svc_tcp["6006"]="x11-6"
+svc_tcp["6007"]="x11-7"
+svc_tcp["6346"]="gnutella-svc"
+svc_tcp["6347"]="gnutella-rtr"
+svc_tcp["6379"]="redis"
+svc_tcp["6444"]="sge-qmaster"
+svc_tcp["6445"]="sge-execd"
+svc_tcp["6446"]="mysql-proxy"
+svc_tcp["6514"]="syslog-tls"
+svc_tcp["6566"]="sane-port"
+svc_tcp["6667"]="ircd"
+svc_tcp["6697"]="ircs-u"
+svc_tcp["7000"]="bbs"
+svc_tcp["7100"]="font-service"
+svc_tcp["8021"]="zope-ftp"
+svc_tcp["8080"]="http-alt"
+svc_tcp["8081"]="tproxy"
+svc_tcp["8088"]="omniorb"
+svc_tcp["8140"]="puppet"
+svc_tcp["8990"]="clc-build-daemon"
+svc_tcp["9098"]="xinetd"
+svc_tcp["9101"]="bacula-dir"
+svc_tcp["9102"]="bacula-fd"
+svc_tcp["9103"]="bacula-sd"
+svc_tcp["9418"]="git"
+svc_tcp["9667"]="xmms2"
+svc_tcp["9673"]="zope"
+svc_tcp["10000"]="webmin"
+svc_tcp["10050"]="zabbix-agent"
+svc_tcp["10051"]="zabbix-trapper"
+svc_tcp["10080"]="amanda"
+svc_tcp["10081"]="kamanda"
+svc_tcp["10082"]="amandaidx"
+svc_tcp["10083"]="amidxtape"
+svc_tcp["10809"]="nbd"
+svc_tcp["11112"]="dicom"
+svc_tcp["11371"]="hkp"
+svc_tcp["17004"]="sgi-cad"
+svc_tcp["17500"]="db-lsp"
+svc_tcp["22125"]="dcap"
+svc_tcp["22128"]="gsidcap"
+svc_tcp["22273"]="wnn6"
+svc_tcp["24554"]="binkp"
+svc_tcp["27374"]="asp"
+svc_tcp["30865"]="csync2"
+svc_tcp["57000"]="dircproxy"
+svc_tcp["60177"]="tfido"
+svc_tcp["60179"]="fido"
+svc_udp=()
+svc_udp["7"]="echo"
+svc_udp["9"]="discard"
+svc_udp["13"]="daytime"
+svc_udp["19"]="chargen"
+svc_udp["21"]="fsp"
+svc_udp["37"]="time"
+svc_udp["49"]="tacacs"
+svc_udp["53"]="domain"
+svc_udp["67"]="bootps"
+svc_udp["68"]="bootpc"
+svc_udp["69"]="tftp"
+svc_udp["88"]="kerberos"
+svc_udp["111"]="sunrpc"
+svc_udp["123"]="ntp"
+svc_udp["137"]="netbios-ns"
+svc_udp["138"]="netbios-dgm"
+svc_udp["161"]="snmp"
+svc_udp["162"]="snmp-trap"
+svc_udp["163"]="cmip-man"
+svc_udp["164"]="cmip-agent"
+svc_udp["177"]="xdmcp"
+svc_udp["213"]="ipx"
+svc_udp["319"]="ptp-event"
+svc_udp["320"]="ptp-general"
+svc_udp["369"]="rpc2portmap"
+svc_udp["370"]="codaauth2"
+svc_udp["371"]="clearcase"
+svc_udp["389"]="ldap"
+svc_udp["427"]="svrloc"
+svc_udp["443"]="https"
+svc_udp["464"]="kpasswd"
+svc_udp["500"]="isakmp"
+svc_udp["512"]="biff"
+svc_udp["513"]="who"
+svc_udp["514"]="syslog"
+svc_udp["517"]="talk"
+svc_udp["518"]="ntalk"
+svc_udp["520"]="route"
+svc_udp["538"]="gdomap"
+svc_udp["546"]="dhcpv6-client"
+svc_udp["547"]="dhcpv6-server"
+svc_udp["554"]="rtsp"
+svc_udp["623"]="asf-rmcp"
+svc_udp["636"]="ldaps"
+svc_udp["646"]="ldp"
+svc_udp["655"]="tinc"
+svc_udp["750"]="kerberos4"
+svc_udp["751"]="kerberos-master"
+svc_udp["752"]="passwd-server"
+svc_udp["779"]="moira-ureg"
+svc_udp["853"]="domain-s"
+svc_udp["1194"]="openvpn"
+svc_udp["1210"]="predict"
+svc_udp["1434"]="ms-sql-m"
+svc_udp["1645"]="datametrics"
+svc_udp["1646"]="sa-msg-port"
+svc_udp["1701"]="l2f"
+svc_udp["1812"]="radius"
+svc_udp["1813"]="radius-acct"
+svc_udp["2049"]="nfs"
+svc_udp["2086"]="gnunet"
+svc_udp["2101"]="rtcm-sc104"
+svc_udp["2102"]="zephyr-srv"
+svc_udp["2103"]="zephyr-clt"
+svc_udp["2104"]="zephyr-hm"
+svc_udp["2430"]="venus"
+svc_udp["2431"]="venus-se"
+svc_udp["2432"]="codasrv"
+svc_udp["2433"]="codasrv-se"
+svc_udp["2583"]="mon"
+svc_udp["3130"]="icpv2"
+svc_udp["3205"]="isns"
+svc_udp["3493"]="nut"
+svc_udp["4500"]="ipsec-nat-t"
+svc_udp["4569"]="iax"
+svc_udp["5060"]="sip"
+svc_udp["5061"]="sip-tls"
+svc_udp["5353"]="mdns"
+svc_udp["5555"]="rplay"
+svc_udp["6346"]="gnutella-svc"
+svc_udp["6347"]="gnutella-rtr"
+svc_udp["6696"]="babel"
+svc_udp["7000"]="afs3-fileserver"
+svc_udp["7001"]="afs3-callback"
+svc_udp["7002"]="afs3-prserver"
+svc_udp["7003"]="afs3-vlserver"
+svc_udp["7004"]="afs3-kaserver"
+svc_udp["7005"]="afs3-volser"
+svc_udp["7007"]="afs3-bos"
+svc_udp["7008"]="afs3-update"
+svc_udp["7009"]="afs3-rmtsys"
+svc_udp["17001"]="sgi-cmsd"
+svc_udp["17002"]="sgi-crsd"
+svc_udp["17003"]="sgi-gcd"
+svc_udp["27374"]="asp"
+###################################
+main "$@"
